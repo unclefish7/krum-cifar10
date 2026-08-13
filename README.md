@@ -4,7 +4,7 @@
 Gradient Descent* 中的 Krum 和 Multi-Krum 拜占庭鲁棒梯度聚合方法，并在
 CIFAR-10 上串行模拟由 10 个 worker 参与的分布式 SGD 训练。
 
-**当前状态：** 仅完成环境配置，尚未实现任何实验代码。
+**当前状态：** 已完成环境配置和最基础的 CIFAR-10 单机 baseline。
 
 ## 环境信息
 
@@ -47,3 +47,21 @@ python -m pip install -r requirements.txt
 ```bash
 python -c "import torch; print('torch:', torch.__version__); print('CUDA runtime:', torch.version.cuda); print('CUDA available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
 ```
+
+## Baseline
+
+当前已实现一个使用小型 CNN 的 CIFAR-10 单机训练 baseline。运行方式：
+
+```bash
+conda activate krum
+python train_baseline.py
+```
+
+可以通过命令行调整基本训练参数，例如：
+
+```bash
+python train_baseline.py --epochs 5 --batch-size 128
+```
+
+首次运行时，torchvision 会自动将 CIFAR-10 下载到 `./data`。当前阶段尚未实现
+distributed SGD、Krum、Multi-Krum 和 Byzantine attacks。
