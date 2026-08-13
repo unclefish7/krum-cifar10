@@ -4,7 +4,8 @@
 Gradient Descent* 中的 Krum 和 Multi-Krum 拜占庭鲁棒梯度聚合方法，并在
 CIFAR-10 上串行模拟由 10 个 worker 参与的分布式 SGD 训练。
 
-**当前状态：** 已完成环境配置和最基础的 CIFAR-10 单机 baseline。
+**当前状态：** 已完成环境配置、CIFAR-10 单机 baseline，以及使用 Mean 聚合的
+10-worker 串行分布式 SGD。
 
 ## 环境信息
 
@@ -64,4 +65,23 @@ python train_baseline.py --epochs 5 --batch-size 128
 ```
 
 首次运行时，torchvision 会自动将 CIFAR-10 下载到 `./data`。当前阶段尚未实现
-distributed SGD、Krum、Multi-Krum 和 Byzantine attacks。
+Krum、Multi-Krum 和 Byzantine attacks。
+
+## 10-worker 串行分布式 SGD
+
+当前已实现单进程内的 10-worker 同步 distributed SGD 模拟。CIFAR-10 训练集
+被确定性地随机划分为 10 个 IID shard；每轮各 worker 基于同一个 global model
+串行计算梯度，parameter server 使用 Mean 聚合，并只更新一次 global model。
+
+```bash
+conda activate krum
+python train_distributed.py --epochs 1
+```
+
+可以使用少量 round 快速验证完整数据流：
+
+```bash
+python train_distributed.py --epochs 1 --max-rounds 2
+```
+
+当前尚未实现 Krum、Multi-Krum 和 Byzantine attacks。
