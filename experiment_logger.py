@@ -207,6 +207,7 @@ class ExperimentRecorder:
             "global_round": global_round,
             "aggregator": aggregator,
             "selected_worker_ids": selected,
+            "byzantine_worker_ids": sorted(byzantine),
             "selected_byzantine": [worker_id in byzantine for worker_id in selected],
         }
         if selected_scores is not None:

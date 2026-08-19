@@ -79,6 +79,11 @@ def run_label(run: RunData, include_seed: bool = True) -> str:
     attack = str(run.config.get("attack", "none"))
     num_byzantine = run.config.get("num_byzantine", 0)
     label = f"{aggregator} | attack={attack} | f={num_byzantine}"
+    selection = run.config.get("byzantine_selection")
+    if attack != "none" and selection:
+        label += f" | selection={selection}"
+    if aggregator == "krum":
+        label += f" | krum_f={run.config.get('krum_f', 0)}"
     if include_seed:
         label += f" | seed={run.config.get('training_seed', '?')}"
     return label
@@ -88,8 +93,10 @@ def condition_key(run: RunData) -> tuple[Any, ...]:
     config = run.config
     return (
         config.get("aggregator"),
+        config.get("krum_f"),
         config.get("attack"),
         config.get("num_byzantine"),
+        config.get("byzantine_selection"),
         json.dumps(config.get("attack_parameters", {}), sort_keys=True),
         config.get("num_workers"),
         config.get("batch_size_per_worker"),

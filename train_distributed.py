@@ -1,4 +1,4 @@
-"""Serial simulation of synchronous distributed SGD with mean aggregation."""
+"""Serial simulation of synchronous distributed SGD with selectable aggregation."""
 
 import argparse
 import time
@@ -9,11 +9,12 @@ from torch import nn
 from torch.optim import SGD
 from tqdm import tqdm
 
+from attacks import apply_attack, select_byzantine_workers
 from data import get_worker_loaders
 from distributed import (
+    aggregate_gradients,
     assign_flat_gradient,
     compute_worker_gradient,
-    mean_aggregate,
 )
 from experiment_logger import ExperimentRecorder, get_git_metadata
 from model import SimpleCNN
@@ -32,11 +33,24 @@ def train_one_distributed_epoch(
     global_round_start: int = 0,
     test_loader: torch.utils.data.DataLoader | None = None,
     eval_interval_rounds: int = 0,
+    aggregator: str = "mean",
+    krum_f: int = 0,
+    attack: str = "none",
+    byzantine_worker_ids: tuple[int, ...] = (),
+    byzantine_selection: str = "fixed",
+    num_byzantine: int = 0,
+    gaussian_std: float = 200.0,
+    attack_generator: torch.Generator | None = None,
+    selection_generator: torch.Generator | None = None,
 ) -> tuple[float, float, int]:
     """Run synchronous rounds, computing every worker serially per round."""
     model.train()
     available_rounds = min(len(loader) for loader in worker_loaders)
-    round_limit = available_rounds if max_rounds is None else min(max_rounds, available_rounds)
+    round_limit = (
+        available_rounds
+        if max_rounds is None
+        else min(max_rounds, available_rounds)
+    )
     total_loss = 0.0
     total_correct = 0
     total_examples = 0
@@ -47,35 +61,69 @@ def train_one_distributed_epoch(
     progress = tqdm(batches_by_round, total=round_limit, desc="Rounds", leave=False)
     for round_in_epoch, worker_batches in enumerate(progress, start=1):
         round_started = time.perf_counter()
+        if attack == "none":
+            round_byzantine_worker_ids: tuple[int, ...] = ()
+        elif byzantine_selection == "fixed":
+            round_byzantine_worker_ids = byzantine_worker_ids
+        elif byzantine_selection == "round":
+            if selection_generator is None:
+                raise ValueError("round selection requires a selection generator")
+            round_byzantine_worker_ids = select_byzantine_workers(
+                num_workers=len(worker_loaders),
+                num_byzantine=num_byzantine,
+                generator=selection_generator,
+            )
+        else:
+            raise ValueError(f"Unknown Byzantine selection mode: {byzantine_selection}")
+        byzantine_worker_set = set(round_byzantine_worker_ids)
+
         worker_gradients = []
         round_loss = 0.0
         round_correct = 0
         round_examples = 0
-        for batch in worker_batches:
+        for worker_id, batch in enumerate(worker_batches):
             gradient, loss, correct, batch_size = compute_worker_gradient(
                 model, batch, criterion, device
             )
             worker_gradients.append(gradient)
-            round_loss += loss * batch_size
-            round_correct += correct
-            round_examples += batch_size
-            total_loss += loss * batch_size
-            total_correct += correct
-            total_examples += batch_size
+            if worker_id not in byzantine_worker_set:
+                round_loss += loss * batch_size
+                round_correct += correct
+                round_examples += batch_size
+                total_loss += loss * batch_size
+                total_correct += correct
+                total_examples += batch_size
 
         stacked_gradients = torch.stack(worker_gradients)
+        submitted_gradients = apply_attack(
+            stacked_gradients,
+            attack=attack,
+            byzantine_worker_ids=round_byzantine_worker_ids,
+            gaussian_std=gaussian_std,
+            generator=attack_generator,
+        )
         if stacked_gradients.is_cuda:
             aggregation_start = torch.cuda.Event(enable_timing=True)
             aggregation_end = torch.cuda.Event(enable_timing=True)
             aggregation_start.record()
-            global_gradient = mean_aggregate(stacked_gradients)
+            aggregation_result = aggregate_gradients(
+                submitted_gradients,
+                aggregator=aggregator,
+                krum_f=krum_f,
+            )
             aggregation_end.record()
             aggregation_end.synchronize()
             aggregation_time = aggregation_start.elapsed_time(aggregation_end) / 1000.0
         else:
             aggregation_started = time.perf_counter()
-            global_gradient = mean_aggregate(stacked_gradients)
+            aggregation_result = aggregate_gradients(
+                submitted_gradients,
+                aggregator=aggregator,
+                krum_f=krum_f,
+            )
             aggregation_time = time.perf_counter() - aggregation_started
+
+        global_gradient = aggregation_result.gradient
 
         # The server applies exactly one update after collecting all workers.
         optimizer.zero_grad(set_to_none=True)
@@ -94,10 +142,21 @@ def train_one_distributed_epoch(
                 round_time_seconds=time.perf_counter() - round_started,
                 aggregation_time_seconds=aggregation_time,
             )
+            selected_worker_ids = (
+                aggregation_result.selected_worker_ids.detach().cpu().tolist()
+            )
+            selected_scores = None
+            if aggregation_result.scores is not None:
+                scores = aggregation_result.scores.detach().cpu()
+                selected_scores = [
+                    scores[worker_id].item() for worker_id in selected_worker_ids
+                ]
             recorder.record_aggregation(
                 global_round=global_round,
-                aggregator="mean",
-                selected_worker_ids=range(len(worker_gradients)),
+                aggregator=aggregator,
+                selected_worker_ids=selected_worker_ids,
+                byzantine_worker_ids=round_byzantine_worker_ids,
+                selected_scores=selected_scores,
             )
 
             should_evaluate = (
@@ -124,12 +183,38 @@ def train_one_distributed_epoch(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train CIFAR-10 with serial distributed SGD and Mean aggregation"
+        description="Train CIFAR-10 with serial distributed SGD"
     )
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--num-workers", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=128, help="batch size per worker")
     parser.add_argument("--learning-rate", type=float, default=0.05)
+    parser.add_argument(
+        "--aggregator",
+        choices=("mean", "krum"),
+        default="mean",
+    )
+    parser.add_argument(
+        "--krum-f",
+        type=int,
+        default=0,
+        help="maximum Byzantine workers Krum is configured to tolerate",
+    )
+    parser.add_argument(
+        "--attack",
+        choices=("none", "gaussian"),
+        default="none",
+    )
+    parser.add_argument("--num-byzantine", type=int, default=0)
+    parser.add_argument(
+        "--byzantine-selection",
+        choices=("fixed", "round"),
+        default="fixed",
+        help="keep Byzantine worker IDs fixed or resample them every round",
+    )
+    parser.add_argument("--byzantine-selection-seed", type=int, default=0)
+    parser.add_argument("--attack-std", type=float, default=200.0)
+    parser.add_argument("--attack-seed", type=int, default=0)
     parser.add_argument("--loader-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0, help="model and training seed")
     parser.add_argument("--partition-seed", type=int, default=0)
@@ -163,6 +248,23 @@ def main() -> None:
         raise ValueError("--max-rounds must be positive")
     if args.eval_interval_rounds < 0:
         raise ValueError("--eval-interval-rounds cannot be negative")
+    if args.krum_f < 0:
+        raise ValueError("--krum-f cannot be negative")
+    if args.num_byzantine < 0 or args.num_byzantine >= args.num_workers:
+        raise ValueError("--num-byzantine must be in [0, num-workers)")
+    if args.attack == "none" and args.num_byzantine != 0:
+        raise ValueError("--attack none requires --num-byzantine 0")
+    if args.attack == "gaussian" and args.num_byzantine == 0:
+        raise ValueError("--attack gaussian requires at least one Byzantine worker")
+    if args.attack == "gaussian" and args.attack_std <= 0:
+        raise ValueError("--attack-std must be positive")
+    if args.aggregator == "krum" and 2 * args.krum_f + 2 >= args.num_workers:
+        raise ValueError(
+            "Krum requires 2 * krum_f + 2 < num_workers, "
+            f"got krum_f={args.krum_f}, num_workers={args.num_workers}"
+        )
+    if args.aggregator == "krum" and args.krum_f < args.num_byzantine:
+        raise ValueError("--krum-f must be at least --num-byzantine")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -177,6 +279,20 @@ def main() -> None:
     )
     print(f"Workers: {len(worker_loaders)}")
     print(f"Samples per worker: {[len(loader.dataset) for loader in worker_loaders]}")
+    print(f"Aggregator: {args.aggregator}")
+    if args.aggregator == "krum":
+        print(f"Krum f: {args.krum_f}")
+    byzantine_worker_ids = (
+        tuple(range(args.num_byzantine))
+        if args.attack != "none" and args.byzantine_selection == "fixed"
+        else ()
+    )
+    print(f"Attack: {args.attack}")
+    if args.attack != "none":
+        print(f"Byzantine selection: {args.byzantine_selection}")
+        if args.byzantine_selection == "fixed":
+            print(f"Byzantine workers: {list(byzantine_worker_ids)}")
+        print(f"Gaussian std: {args.attack_std}")
 
     torch.manual_seed(args.seed)
     if device.type == "cuda":
@@ -185,18 +301,33 @@ def main() -> None:
     model = SimpleCNN().to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = SGD(model.parameters(), lr=args.learning_rate)
+    attack_generator = None
+    selection_generator = None
+    if args.attack != "none":
+        attack_generator = torch.Generator(device=device).manual_seed(args.attack_seed)
+        selection_generator = torch.Generator().manual_seed(
+            args.byzantine_selection_seed
+        )
 
     recorder = None
     if not args.no_record:
         config = {
             "dataset": "CIFAR-10",
             "model": "SimpleCNN",
-            "aggregator": "mean",
+            "aggregator": args.aggregator,
+            "krum_f": args.krum_f,
             "num_workers": args.num_workers,
-            "num_byzantine": 0,
-            "byzantine_worker_ids": [],
-            "attack": "none",
-            "attack_parameters": {},
+            "num_byzantine": args.num_byzantine,
+            "byzantine_worker_ids": list(byzantine_worker_ids),
+            "byzantine_selection": args.byzantine_selection,
+            "byzantine_selection_seed": args.byzantine_selection_seed,
+            "attack": args.attack,
+            "attack_parameters": (
+                {"mean": 0.0, "std": args.attack_std}
+                if args.attack == "gaussian"
+                else {}
+            ),
+            "attack_seed": args.attack_seed,
             "multi_krum_m": None,
             "epochs": args.epochs,
             "max_rounds_per_epoch": args.max_rounds,
@@ -249,6 +380,15 @@ def main() -> None:
                 global_round_start=global_round,
                 test_loader=test_loader,
                 eval_interval_rounds=args.eval_interval_rounds,
+                aggregator=args.aggregator,
+                krum_f=args.krum_f,
+                attack=args.attack,
+                byzantine_worker_ids=byzantine_worker_ids,
+                byzantine_selection=args.byzantine_selection,
+                num_byzantine=args.num_byzantine,
+                gaussian_std=args.attack_std,
+                attack_generator=attack_generator,
+                selection_generator=selection_generator,
             )
             global_round += rounds
             final_test_loss, final_test_accuracy = evaluate(
