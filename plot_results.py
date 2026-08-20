@@ -82,8 +82,10 @@ def run_label(run: RunData, include_seed: bool = True) -> str:
     selection = run.config.get("byzantine_selection")
     if attack != "none" and selection:
         label += f" | selection={selection}"
-    if aggregator == "krum":
+    if aggregator in ("krum", "multi-krum"):
         label += f" | krum_f={run.config.get('krum_f', 0)}"
+    if aggregator == "multi-krum":
+        label += f" | m={run.config.get('multi_krum_m', '?')}"
     if include_seed:
         label += f" | seed={run.config.get('training_seed', '?')}"
     return label
@@ -94,6 +96,7 @@ def condition_key(run: RunData) -> tuple[Any, ...]:
     return (
         config.get("aggregator"),
         config.get("krum_f"),
+        config.get("multi_krum_m"),
         config.get("attack"),
         config.get("num_byzantine"),
         config.get("byzantine_selection"),
@@ -237,7 +240,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="group equal configurations and plot mean plus/minus one standard deviation",
     )
-    parser.add_argument("--title", default="Mean / Krum Experiment Comparison")
+    parser.add_argument(
+        "--title",
+        default="Mean / Krum / Multi-Krum Experiment Comparison",
+    )
     return parser.parse_args()
 
 

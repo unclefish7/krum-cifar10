@@ -35,6 +35,7 @@ def train_one_distributed_epoch(
     eval_interval_rounds: int = 0,
     aggregator: str = "mean",
     krum_f: int = 0,
+    multi_krum_m: int | None = None,
     attack: str = "none",
     byzantine_worker_ids: tuple[int, ...] = (),
     byzantine_selection: str = "fixed",
@@ -110,6 +111,7 @@ def train_one_distributed_epoch(
                 submitted_gradients,
                 aggregator=aggregator,
                 krum_f=krum_f,
+                multi_krum_m=multi_krum_m,
             )
             aggregation_end.record()
             aggregation_end.synchronize()
@@ -120,6 +122,7 @@ def train_one_distributed_epoch(
                 submitted_gradients,
                 aggregator=aggregator,
                 krum_f=krum_f,
+                multi_krum_m=multi_krum_m,
             )
             aggregation_time = time.perf_counter() - aggregation_started
 
@@ -191,7 +194,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=0.05)
     parser.add_argument(
         "--aggregator",
-        choices=("mean", "krum"),
+        choices=("mean", "krum", "multi-krum"),
         default="mean",
     )
     parser.add_argument(
@@ -199,6 +202,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="maximum Byzantine workers Krum is configured to tolerate",
+    )
+    parser.add_argument(
+        "--multi-krum-m",
+        type=int,
+        default=None,
+        help="gradients selected by Multi-Krum; defaults to num_workers - krum_f",
     )
     parser.add_argument(
         "--attack",
@@ -258,13 +267,28 @@ def main() -> None:
         raise ValueError("--attack gaussian requires at least one Byzantine worker")
     if args.attack == "gaussian" and args.attack_std <= 0:
         raise ValueError("--attack-std must be positive")
-    if args.aggregator == "krum" and 2 * args.krum_f + 2 >= args.num_workers:
+    krum_based = args.aggregator in ("krum", "multi-krum")
+    if krum_based and 2 * args.krum_f + 2 >= args.num_workers:
         raise ValueError(
-            "Krum requires 2 * krum_f + 2 < num_workers, "
+            "Krum-based aggregation requires 2 * krum_f + 2 < num_workers, "
             f"got krum_f={args.krum_f}, num_workers={args.num_workers}"
         )
-    if args.aggregator == "krum" and args.krum_f < args.num_byzantine:
-        raise ValueError("--krum-f must be at least --num-byzantine")
+    if krum_based and args.krum_f < args.num_byzantine:
+        raise ValueError(
+            "Krum-based aggregation requires --krum-f to be at least "
+            "--num-byzantine"
+        )
+    if args.multi_krum_m is not None and args.aggregator != "multi-krum":
+        raise ValueError("--multi-krum-m is only valid with --aggregator multi-krum")
+    multi_krum_m = None
+    if args.aggregator == "multi-krum":
+        multi_krum_m = (
+            args.num_workers - args.krum_f
+            if args.multi_krum_m is None
+            else args.multi_krum_m
+        )
+        if multi_krum_m <= 0 or multi_krum_m > args.num_workers:
+            raise ValueError("--multi-krum-m must be in [1, num-workers]")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -280,8 +304,10 @@ def main() -> None:
     print(f"Workers: {len(worker_loaders)}")
     print(f"Samples per worker: {[len(loader.dataset) for loader in worker_loaders]}")
     print(f"Aggregator: {args.aggregator}")
-    if args.aggregator == "krum":
+    if krum_based:
         print(f"Krum f: {args.krum_f}")
+    if args.aggregator == "multi-krum":
+        print(f"Multi-Krum m: {multi_krum_m}")
     byzantine_worker_ids = (
         tuple(range(args.num_byzantine))
         if args.attack != "none" and args.byzantine_selection == "fixed"
@@ -328,7 +354,7 @@ def main() -> None:
                 else {}
             ),
             "attack_seed": args.attack_seed,
-            "multi_krum_m": None,
+            "multi_krum_m": multi_krum_m,
             "epochs": args.epochs,
             "max_rounds_per_epoch": args.max_rounds,
             "batch_size_per_worker": args.batch_size,
@@ -382,6 +408,7 @@ def main() -> None:
                 eval_interval_rounds=args.eval_interval_rounds,
                 aggregator=args.aggregator,
                 krum_f=args.krum_f,
+                multi_krum_m=multi_krum_m,
                 attack=args.attack,
                 byzantine_worker_ids=byzantine_worker_ids,
                 byzantine_selection=args.byzantine_selection,

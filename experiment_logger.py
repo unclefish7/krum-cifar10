@@ -203,12 +203,19 @@ class ExperimentRecorder:
         self._ensure_open()
         selected = list(selected_worker_ids)
         byzantine = set(byzantine_worker_ids)
+        selected_byzantine = [worker_id in byzantine for worker_id in selected]
+        selected_byzantine_count = sum(selected_byzantine)
         event: dict[str, Any] = {
             "global_round": global_round,
             "aggregator": aggregator,
             "selected_worker_ids": selected,
+            "selected_worker_count": len(selected),
             "byzantine_worker_ids": sorted(byzantine),
-            "selected_byzantine": [worker_id in byzantine for worker_id in selected],
+            "selected_byzantine": selected_byzantine,
+            "selected_byzantine_count": selected_byzantine_count,
+            "selected_byzantine_fraction": (
+                selected_byzantine_count / len(selected) if selected else 0.0
+            ),
         }
         if selected_scores is not None:
             event["selected_scores"] = list(selected_scores)

@@ -8,7 +8,7 @@ from torch import Tensor, nn
 
 @dataclass(frozen=True)
 class AggregationResult:
-    """Result shared by Mean, Krum and future aggregation rules."""
+    """Result shared by Mean, Krum, Multi-Krum and future rules."""
 
     gradient: Tensor
     selected_worker_ids: Tensor
@@ -55,11 +55,11 @@ def mean_aggregate(worker_gradients: Tensor) -> Tensor:
     return worker_gradients.mean(dim=0)
 
 
-def krum_aggregate(
+def _krum_scores(
     worker_gradients: Tensor,
     num_byzantine: int,
-) -> AggregationResult:
-    """Select one worker gradient using the Krum aggregation rule.
+) -> Tensor:
+    """Compute the Krum score of every submitted worker gradient.
 
     For each worker, the Krum score is the sum of squared distances to its
     ``num_workers - num_byzantine - 2`` closest other worker gradients.
@@ -93,7 +93,15 @@ def krum_aggregate(
         dim=1,
         largest=False,
     ).values
-    scores = closest_distances.sum(dim=1)
+    return closest_distances.sum(dim=1)
+
+
+def krum_aggregate(
+    worker_gradients: Tensor,
+    num_byzantine: int,
+) -> AggregationResult:
+    """Select the single lowest-scoring worker gradient using Krum."""
+    scores = _krum_scores(worker_gradients, num_byzantine)
     selected_worker = scores.argmin()
 
     return AggregationResult(
@@ -103,10 +111,36 @@ def krum_aggregate(
     )
 
 
+def multi_krum_aggregate(
+    worker_gradients: Tensor,
+    num_byzantine: int,
+    num_selected: int,
+) -> AggregationResult:
+    """Average the ``num_selected`` lowest-scoring gradients using Multi-Krum."""
+    num_workers = worker_gradients.size(0) if worker_gradients.ndim >= 1 else 0
+    if num_selected <= 0 or num_selected > num_workers:
+        raise ValueError(
+            "Multi-Krum num_selected must be in [1, num_workers], "
+            f"got num_selected={num_selected}, num_workers={num_workers}"
+        )
+
+    scores = _krum_scores(worker_gradients, num_byzantine)
+    # Stable sorting makes equal-score ties deterministic by preserving the
+    # original worker-ID order.
+    selected_workers = torch.argsort(scores, stable=True)[:num_selected]
+
+    return AggregationResult(
+        gradient=worker_gradients[selected_workers].mean(dim=0),
+        selected_worker_ids=selected_workers,
+        scores=scores,
+    )
+
+
 def aggregate_gradients(
     worker_gradients: Tensor,
     aggregator: str,
     krum_f: int = 0,
+    multi_krum_m: int | None = None,
 ) -> AggregationResult:
     """Dispatch worker gradients to the selected aggregation rule."""
     if aggregator == "mean":
@@ -120,6 +154,14 @@ def aggregate_gradients(
         )
     if aggregator == "krum":
         return krum_aggregate(worker_gradients, num_byzantine=krum_f)
+    if aggregator == "multi-krum":
+        if multi_krum_m is None:
+            raise ValueError("Multi-Krum requires multi_krum_m")
+        return multi_krum_aggregate(
+            worker_gradients,
+            num_byzantine=krum_f,
+            num_selected=multi_krum_m,
+        )
     raise ValueError(f"Unknown aggregator: {aggregator}")
 
 
