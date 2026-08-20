@@ -15,6 +15,7 @@ Gradient Descent* 中的 Krum / Multi-Krum 梯度聚合方法，并在 CIFAR-10 
 - Krum 聚合及 `--aggregator` 选择接口
 - Multi-Krum 聚合，可配置选择梯度数量 `m`
 - Gaussian Byzantine attack
+- Omniscient opposite-gradient Byzantine attack
 - 固定或逐 round 随机选择恶意 worker
 - 实验配置、逐 round 指标和测试指标记录
 - 多次实验结果解析与对比绘图
@@ -34,7 +35,7 @@ data.py                 CIFAR-10 加载和 10-worker IID 划分
 model.py                SimpleCNN
 train_baseline.py       单机 Adam baseline
 distributed.py          梯度操作、Mean、Krum 和 Multi-Krum
-attacks.py              Gaussian Byzantine gradient attack
+attacks.py              Gaussian 和 Omniscient Byzantine gradient attacks
 train_distributed.py    10-worker 串行同步训练入口
 experiment_logger.py    实验结果记录器
 plot_results.py         多实验结果解析与绘图
@@ -286,9 +287,94 @@ python train_distributed.py \
 loss 和 accuracy 只统计当前 round 的诚实 worker。`aggregation.jsonl` 会逐 round
 保存实际恶意 worker ID，并记录聚合器是否选择了恶意 worker。
 
+## Omniscient 反向梯度攻击
+
+论文中的 omniscient adversary 掌握一个高精度梯度估计，并提交方向相反、幅度很大的
+梯度。本项目在每个 round 使用全部诚实 worker 梯度的平均值作为攻击者的估计：
+
+```text
+honest_mean = mean(all honest worker gradients)
+malicious_gradient = -attack_scale * honest_mean
+```
+
+所有恶意 worker 提交同一个 `malicious_gradient`。论文实验通过全数据集计算高精度
+估计；这里使用攻击者已知的当轮诚实梯度均值，避免每个 global round 额外遍历完整
+CIFAR-10 训练集，同时保留“知道正确方向并反向放大”的攻击机制。
+
+默认使用：
+
+```text
+--attack omniscient
+--attack-scale 100
+--num-byzantine 3
+--byzantine-selection fixed
+```
+
+`--attack-scale` 必须为正数。该攻击本身是确定性的，不使用 `--attack-seed`；如果使用
+额外的 `round` 恶意 worker 选择模式，worker 身份仍由
+`--byzantine-selection-seed` 控制。
+
+### Mean + Omniscient attack
+
+```bash
+python train_distributed.py \
+  --epochs 60 \
+  --batch-size 50 \
+  --learning-rate 0.05 \
+  --aggregator mean \
+  --attack omniscient \
+  --attack-scale 100 \
+  --num-byzantine 3 \
+  --byzantine-selection fixed \
+  --eval-interval-rounds 100 \
+  --seed 0 \
+  --partition-seed 0 \
+  --run-name mean-omniscient-f3-fixed-scale100-6000rounds-seed0
+```
+
+### Krum + Omniscient attack
+
+```bash
+python train_distributed.py \
+  --epochs 60 \
+  --batch-size 50 \
+  --learning-rate 0.05 \
+  --aggregator krum \
+  --krum-f 3 \
+  --attack omniscient \
+  --attack-scale 100 \
+  --num-byzantine 3 \
+  --byzantine-selection fixed \
+  --eval-interval-rounds 100 \
+  --seed 0 \
+  --partition-seed 0 \
+  --run-name krum-omniscient-f3-fixed-scale100-6000rounds-seed0
+```
+
+### Multi-Krum + Omniscient attack
+
+```bash
+python train_distributed.py \
+  --epochs 60 \
+  --batch-size 50 \
+  --learning-rate 0.05 \
+  --aggregator multi-krum \
+  --krum-f 3 \
+  --multi-krum-m 7 \
+  --attack omniscient \
+  --attack-scale 100 \
+  --num-byzantine 3 \
+  --byzantine-selection fixed \
+  --eval-interval-rounds 100 \
+  --seed 0 \
+  --partition-seed 0 \
+  --run-name multi-krum-omniscient-f3-fixed-m7-scale100-6000rounds-seed0
+```
+
 ## 批量运行
 
-`run_experiments.sh` 默认批量调度标准六组实验的 seed 0、1、2，并允许最多六个训练
+`run_experiments.sh` 默认批量调度 3 种聚合器在 clean、Gaussian 和 Omniscient
+三种条件下的 seed 0、1、2，并允许最多六个训练
 进程同时共享 GPU。脚本不会跳过已经完成的实验；再次执行会重新运行全部启用项。
 
 运行前直接编辑脚本顶部：
@@ -309,7 +395,16 @@ EXPERIMENTS=(
   "mean|gaussian"
   "krum|gaussian"
   "multi-krum|gaussian"
+  "mean|omniscient"
+  "krum|omniscient"
+  "multi-krum|omniscient"
 )
+```
+
+默认任务数量为：
+
+```text
+3 aggregators * 3 conditions * 3 seeds = 27 jobs
 ```
 
 例如只运行 Krum 和 Multi-Krum 的 Gaussian attack：
@@ -322,6 +417,9 @@ EXPERIMENTS=(
   # "mean|gaussian"
   "krum|gaussian"
   "multi-krum|gaussian"
+  # "mean|omniscient"
+  # "krum|omniscient"
+  # "multi-krum|omniscient"
 )
 ```
 
@@ -523,6 +621,31 @@ python plot_results.py \
   --output results/krum-vs-multi-krum-gaussian-seed0.png
 ```
 
+### Omniscient attack 对比
+
+比较 Mean、Krum 和 Multi-Krum 在反向梯度攻击下的表现：
+
+```bash
+python plot_results.py \
+  results/*mean-omniscient-f3-fixed-scale100-6000rounds-seed0 \
+  results/*krum-omniscient-f3-fixed-scale100-6000rounds-seed0 \
+  results/*multi-krum-omniscient-f3-fixed-m7-scale100-6000rounds-seed0 \
+  --title "Mean vs Krum vs Multi-Krum under omniscient attack" \
+  --output results/omniscient-aggregators-seed0.png
+```
+
+比较 Krum 和 Multi-Krum 在无攻击及反向梯度攻击下的表现：
+
+```bash
+python plot_results.py \
+  results/*krum-clean-f3-6000rounds-seed0 \
+  results/*multi-krum-clean-f3-m7-6000rounds-seed0 \
+  results/*krum-omniscient-f3-fixed-scale100-6000rounds-seed0 \
+  results/*multi-krum-omniscient-f3-fixed-m7-scale100-6000rounds-seed0 \
+  --title "Krum vs Multi-Krum: clean and omniscient attack" \
+  --output results/krum-vs-multi-krum-omniscient-seed0.png
+```
+
 ### 多随机种子均值与标准差
 
 完成 seed 0、1、2 后加入 `--aggregate-seeds`。绘图器会按照相同实验配置分组，绘制
@@ -577,5 +700,5 @@ Mean 无攻击的历史实验在 round 3900 达到最佳测试准确率 72.71%�
 
 1. 补齐 fixed Byzantine worker 下的标准六组实验
 2. 使用 seed 0、1、2 重复核心实验并汇总均值与标准差
-3. 实现并评估 omniscient Byzantine attack
+3. 运行并评估 omniscient Byzantine attack
 4. 增加自动批量实验脚本并整理最终实验结论

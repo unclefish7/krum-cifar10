@@ -59,11 +59,64 @@ def gaussian_attack(
     return submitted_gradients
 
 
+def omniscient_attack(
+    worker_gradients: Tensor,
+    byzantine_worker_ids: Sequence[int],
+    scale: float = 100.0,
+) -> Tensor:
+    """Submit a large gradient opposite to the mean honest gradient.
+
+    The attack models the paper's omniscient adversary using the current
+    round's mean honest gradient as its accurate gradient estimate. Every
+    Byzantine worker submits the same ``-scale * honest_mean`` vector.
+    """
+    if worker_gradients.ndim != 2 or worker_gradients.size(0) == 0:
+        raise ValueError("worker_gradients must have shape [num_workers, num_parameters]")
+    if scale <= 0:
+        raise ValueError("Omniscient attack scale must be positive")
+
+    worker_ids = list(byzantine_worker_ids)
+    if not worker_ids:
+        raise ValueError("Omniscient attack requires at least one Byzantine worker")
+    if len(set(worker_ids)) != len(worker_ids):
+        raise ValueError("Byzantine worker IDs must be unique")
+    if any(
+        worker_id < 0 or worker_id >= worker_gradients.size(0)
+        for worker_id in worker_ids
+    ):
+        raise ValueError("Byzantine worker ID is out of range")
+    if len(worker_ids) == worker_gradients.size(0):
+        raise ValueError("Omniscient attack requires at least one honest worker")
+
+    worker_index = torch.tensor(
+        worker_ids,
+        device=worker_gradients.device,
+        dtype=torch.long,
+    )
+    honest_mask = torch.ones(
+        worker_gradients.size(0),
+        device=worker_gradients.device,
+        dtype=torch.bool,
+    )
+    honest_mask[worker_index] = False
+    honest_mean = worker_gradients[honest_mask].mean(dim=0)
+    malicious_gradient = -scale * honest_mean
+
+    submitted_gradients = worker_gradients.clone()
+    submitted_gradients.index_copy_(
+        0,
+        worker_index,
+        malicious_gradient.unsqueeze(0).expand(len(worker_ids), -1),
+    )
+    return submitted_gradients
+
+
 def apply_attack(
     worker_gradients: Tensor,
     attack: str,
     byzantine_worker_ids: Sequence[int],
     gaussian_std: float = 200.0,
+    omniscient_scale: float = 100.0,
     generator: torch.Generator | None = None,
 ) -> Tensor:
     """Return the gradients actually submitted to the aggregation rule."""
@@ -77,5 +130,11 @@ def apply_attack(
             byzantine_worker_ids=byzantine_worker_ids,
             std=gaussian_std,
             generator=generator,
+        )
+    if attack == "omniscient":
+        return omniscient_attack(
+            worker_gradients,
+            byzantine_worker_ids=byzantine_worker_ids,
+            scale=omniscient_scale,
         )
     raise ValueError(f"Unknown attack: {attack}")

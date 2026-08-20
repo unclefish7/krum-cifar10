@@ -10,11 +10,11 @@
 set -uo pipefail
 
 # Run every enabled experiment once for each seed.
-SEEDS=(0 1 2)
+SEEDS=(0 1 2 3 4)
 
 # Maximum number of training processes sharing the GPU at the same time.
 # Use 1 for clean timing measurements and a higher value for throughput.
-MAX_JOBS=6
+MAX_JOBS=3
 
 # Poll running jobs this often and print one separated progress snapshot.
 PROGRESS_INTERVAL_SECONDS=10
@@ -22,7 +22,7 @@ PROGRESS_INTERVAL_SECONDS=10
 # Format: "aggregator|condition"
 #
 # Available aggregators: mean, krum, multi-krum
-# Available conditions:  clean, gaussian
+# Available conditions:  clean, gaussian, omniscient
 #
 # Comment out any line that should not run. Add it back to enable it again.
 EXPERIMENTS=(
@@ -32,6 +32,9 @@ EXPERIMENTS=(
   "mean|gaussian"
   "krum|gaussian"
   "multi-krum|gaussian"
+  "mean|omniscient"
+  "krum|omniscient"
+  "multi-krum|omniscient"
 )
 
 # Standard experiment configuration. These values are shared by every run.
@@ -44,6 +47,7 @@ NUM_BYZANTINE=3
 KRUM_F=3
 MULTI_KRUM_M=7
 ATTACK_STD=200
+ATTACK_SCALE=100
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$SCRIPT_DIR"
@@ -117,6 +121,15 @@ build_run_name() {
     "multi-krum|gaussian")
       echo "multi-krum-gaussian-f3-fixed-m7-6000rounds-seed${seed}"
       ;;
+    "mean|omniscient")
+      echo "mean-omniscient-f3-fixed-scale100-6000rounds-seed${seed}"
+      ;;
+    "krum|omniscient")
+      echo "krum-omniscient-f3-fixed-scale100-6000rounds-seed${seed}"
+      ;;
+    "multi-krum|omniscient")
+      echo "multi-krum-omniscient-f3-fixed-m7-scale100-6000rounds-seed${seed}"
+      ;;
     *)
       return 1
       ;;
@@ -170,6 +183,14 @@ run_experiment() {
         --byzantine-selection fixed
         --attack-std "$ATTACK_STD"
         --attack-seed "$seed"
+      )
+      ;;
+    omniscient)
+      command+=(
+        --attack omniscient
+        --num-byzantine "$NUM_BYZANTINE"
+        --byzantine-selection fixed
+        --attack-scale "$ATTACK_SCALE"
       )
       ;;
     *)

@@ -41,6 +41,7 @@ def train_one_distributed_epoch(
     byzantine_selection: str = "fixed",
     num_byzantine: int = 0,
     gaussian_std: float = 200.0,
+    omniscient_scale: float = 100.0,
     attack_generator: torch.Generator | None = None,
     selection_generator: torch.Generator | None = None,
 ) -> tuple[float, float, int]:
@@ -101,6 +102,7 @@ def train_one_distributed_epoch(
             attack=attack,
             byzantine_worker_ids=round_byzantine_worker_ids,
             gaussian_std=gaussian_std,
+            omniscient_scale=omniscient_scale,
             generator=attack_generator,
         )
         if stacked_gradients.is_cuda:
@@ -211,7 +213,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--attack",
-        choices=("none", "gaussian"),
+        choices=("none", "gaussian", "omniscient"),
         default="none",
     )
     parser.add_argument("--num-byzantine", type=int, default=0)
@@ -223,6 +225,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--byzantine-selection-seed", type=int, default=0)
     parser.add_argument("--attack-std", type=float, default=200.0)
+    parser.add_argument(
+        "--attack-scale",
+        type=float,
+        default=100.0,
+        help="opposite-gradient multiplier used by the omniscient attack",
+    )
     parser.add_argument("--attack-seed", type=int, default=0)
     parser.add_argument("--loader-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0, help="model and training seed")
@@ -263,10 +271,12 @@ def main() -> None:
         raise ValueError("--num-byzantine must be in [0, num-workers)")
     if args.attack == "none" and args.num_byzantine != 0:
         raise ValueError("--attack none requires --num-byzantine 0")
-    if args.attack == "gaussian" and args.num_byzantine == 0:
-        raise ValueError("--attack gaussian requires at least one Byzantine worker")
+    if args.attack != "none" and args.num_byzantine == 0:
+        raise ValueError(f"--attack {args.attack} requires at least one Byzantine worker")
     if args.attack == "gaussian" and args.attack_std <= 0:
         raise ValueError("--attack-std must be positive")
+    if args.attack == "omniscient" and args.attack_scale <= 0:
+        raise ValueError("--attack-scale must be positive")
     krum_based = args.aggregator in ("krum", "multi-krum")
     if krum_based and 2 * args.krum_f + 2 >= args.num_workers:
         raise ValueError(
@@ -318,7 +328,10 @@ def main() -> None:
         print(f"Byzantine selection: {args.byzantine_selection}")
         if args.byzantine_selection == "fixed":
             print(f"Byzantine workers: {list(byzantine_worker_ids)}")
-        print(f"Gaussian std: {args.attack_std}")
+        if args.attack == "gaussian":
+            print(f"Gaussian std: {args.attack_std}")
+        elif args.attack == "omniscient":
+            print(f"Omniscient scale: {args.attack_scale}")
 
     torch.manual_seed(args.seed)
     if device.type == "cuda":
@@ -329,8 +342,9 @@ def main() -> None:
     optimizer = SGD(model.parameters(), lr=args.learning_rate)
     attack_generator = None
     selection_generator = None
-    if args.attack != "none":
+    if args.attack == "gaussian":
         attack_generator = torch.Generator(device=device).manual_seed(args.attack_seed)
+    if args.attack != "none":
         selection_generator = torch.Generator().manual_seed(
             args.byzantine_selection_seed
         )
@@ -351,9 +365,16 @@ def main() -> None:
             "attack_parameters": (
                 {"mean": 0.0, "std": args.attack_std}
                 if args.attack == "gaussian"
-                else {}
+                else (
+                    {
+                        "scale": args.attack_scale,
+                        "gradient_estimate": "current_round_honest_mean",
+                    }
+                    if args.attack == "omniscient"
+                    else {}
+                )
             ),
-            "attack_seed": args.attack_seed,
+            "attack_seed": args.attack_seed if args.attack == "gaussian" else None,
             "multi_krum_m": multi_krum_m,
             "epochs": args.epochs,
             "max_rounds_per_epoch": args.max_rounds,
@@ -414,6 +435,7 @@ def main() -> None:
                 byzantine_selection=args.byzantine_selection,
                 num_byzantine=args.num_byzantine,
                 gaussian_std=args.attack_std,
+                omniscient_scale=args.attack_scale,
                 attack_generator=attack_generator,
                 selection_generator=selection_generator,
             )
