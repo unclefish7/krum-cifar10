@@ -288,14 +288,15 @@ loss 和 accuracy 只统计当前 round 的诚实 worker。`aggregation.jsonl` �
 
 ## 批量运行
 
-`run_experiments.sh` 默认批量调度标准六组实验的 seed 0、1、2，并允许最多三个训练
+`run_experiments.sh` 默认批量调度标准六组实验的 seed 0、1、2，并允许最多六个训练
 进程同时共享 GPU。脚本不会跳过已经完成的实验；再次执行会重新运行全部启用项。
 
 运行前直接编辑脚本顶部：
 
 ```bash
 SEEDS=(0 1 2)
-MAX_JOBS=3
+MAX_JOBS=6
+PROGRESS_INTERVAL_SECONDS=10
 ```
 
 实验列表采用 `aggregator|condition` 格式。保留某行表示运行，注释掉表示不运行：
@@ -343,10 +344,24 @@ results/batch_logs/<run-name>.log
 tail -f results/batch_logs/RUN_NAME.log
 ```
 
+主终端每 10 秒检查一次运行状态，并将同一次检查的所有任务放在两条横线之间。每个
+任务都会打印基于已完成 global rounds 的字符进度条，例如：
+
+```text
+--------------------------------------------------------------------------------
+Progress update: 2026-08-20T15:30:00+08:00
+[progress] mean-clean-6000rounds-seed0              [########------------] 40% 2400/6000
+[progress] krum-gaussian-f3-fixed-6000rounds-seed0  [######--------------] 30% 1800/6000
+--------------------------------------------------------------------------------
+```
+
+检查间隔可以通过 `PROGRESS_INTERVAL_SECONDS` 调整。启动和数据加载期间尚未生成
+`rounds.csv` 时，任务会暂时显示为 0%。
+
 重新运行同名任务时，训练记录仍会因时间戳不同而保存在新的实验目录中，但对应的
 `batch_logs/<run-name>.log` 会被本次输出覆盖。
 
-使用 `MAX_JOBS=1` 可获得更干净的耗时数据；`MAX_JOBS=3` 适合提高多 seed 准确率
+使用 `MAX_JOBS=1` 可获得更干净的耗时数据；较大的 `MAX_JOBS` 适合提高多 seed 准确率
 实验的整体吞吐量。并发运行得到的 aggregation time、round time 和 total time 不应
 用于严格的聚合器性能对比。
 

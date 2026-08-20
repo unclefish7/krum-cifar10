@@ -13,8 +13,11 @@ set -uo pipefail
 SEEDS=(0 1 2)
 
 # Maximum number of training processes sharing the GPU at the same time.
-# Use 1 for clean timing measurements and 3 for higher experiment throughput.
-MAX_JOBS=3
+# Use 1 for clean timing measurements and a higher value for throughput.
+MAX_JOBS=6
+
+# Poll running jobs this often and print one separated progress snapshot.
+PROGRESS_INTERVAL_SECONDS=10
 
 # Format: "aggregator|condition"
 #
@@ -66,6 +69,11 @@ if (( MAX_JOBS < 1 )); then
   exit 1
 fi
 
+if (( PROGRESS_INTERVAL_SECONDS < 1 )); then
+  echo "Error: PROGRESS_INTERVAL_SECONDS must be at least 1" >&2
+  exit 1
+fi
+
 if (( ${#SEEDS[@]} == 0 )); then
   echo "Error: SEEDS cannot be empty" >&2
   exit 1
@@ -83,6 +91,7 @@ RUNNING_JOBS=0
 FAILED_JOBS=0
 COMPLETED_JOBS=0
 TOTAL_JOBS=$((${#SEEDS[@]} * ${#EXPERIMENTS[@]}))
+EXPECTED_ROUNDS=$((EPOCHS * 5000 / BATCH_SIZE))
 
 build_run_name() {
   local aggregator=$1
@@ -192,29 +201,89 @@ run_experiment() {
   } >"$log_file" 2>&1
 }
 
-reap_one_job() {
-  local finished_pid
+print_job_progress() {
+  local pid
+  local name
+  local log_file
+  local run_dir
+  local rounds_file
+  local completed_rounds
+  local percent
+  local bar_width=20
+  local filled
+  local empty
+  local bar
+  local empty_bar
+
+  for pid in "${!JOB_NAMES[@]}"; do
+    name=${JOB_NAMES[$pid]}
+    log_file="results/batch_logs/${name}.log"
+    run_dir=""
+    if [[ -f $log_file ]]; then
+      run_dir=$(awk '/^Results: / { sub(/^Results: /, ""); value=$0 } END { print value }' "$log_file")
+    fi
+
+    completed_rounds=0
+    rounds_file="$run_dir/rounds.csv"
+    if [[ -n $run_dir && -f $rounds_file ]]; then
+      completed_rounds=$(awk 'END { print (NR > 0 ? NR - 1 : 0) }' "$rounds_file")
+    fi
+    if (( completed_rounds > EXPECTED_ROUNDS )); then
+      completed_rounds=$EXPECTED_ROUNDS
+    fi
+
+    percent=$((completed_rounds * 100 / EXPECTED_ROUNDS))
+    filled=$((percent * bar_width / 100))
+    empty=$((bar_width - filled))
+    printf -v bar '%*s' "$filled" ''
+    bar=${bar// /#}
+    printf -v empty_bar '%*s' "$empty" ''
+    empty_bar=${empty_bar// /-}
+    printf '[progress] %-58s [%s%s] %3d%% %4d/%d\n' \
+      "$name" "$bar" "$empty_bar" "$percent" "$completed_rounds" "$EXPECTED_ROUNDS"
+  done
+}
+
+reap_finished_jobs() {
+  local pid
   local status
   local name
+  local active_pids
 
-  if wait -n -p finished_pid; then
-    status=0
-  else
-    status=$?
-  fi
+  active_pids=" $(jobs -pr | tr '\n' ' ')"
+  for pid in "${!JOB_NAMES[@]}"; do
+    if [[ $active_pids == *" $pid "* ]]; then
+      continue
+    fi
 
-  name=${JOB_NAMES[$finished_pid]:-"pid-$finished_pid"}
-  unset "JOB_NAMES[$finished_pid]"
-  ((RUNNING_JOBS -= 1))
-  ((COMPLETED_JOBS += 1))
+    name=${JOB_NAMES[$pid]:-"pid-$pid"}
+    if wait "$pid"; then
+      status=0
+    else
+      status=$?
+    fi
+    unset "JOB_NAMES[$pid]"
+    ((RUNNING_JOBS -= 1))
+    ((COMPLETED_JOBS += 1))
 
-  if (( status == 0 )); then
-    echo "[$COMPLETED_JOBS/$TOTAL_JOBS] Completed: $name"
-  else
-    ((FAILED_JOBS += 1))
-    echo "[$COMPLETED_JOBS/$TOTAL_JOBS] Failed ($status): $name" >&2
-    echo "  Log: results/batch_logs/${name}.log" >&2
-  fi
+    if (( status == 0 )); then
+      echo "[$COMPLETED_JOBS/$TOTAL_JOBS] Completed: $name"
+    else
+      ((FAILED_JOBS += 1))
+      echo "[$COMPLETED_JOBS/$TOTAL_JOBS] Failed ($status): $name" >&2
+      echo "  Log: results/batch_logs/${name}.log" >&2
+    fi
+  done
+}
+
+wait_for_progress_or_completion() {
+  sleep "$PROGRESS_INTERVAL_SECONDS"
+  echo
+  echo "--------------------------------------------------------------------------------"
+  echo "Progress update: $(date --iso-8601=seconds)"
+  print_job_progress
+  reap_finished_jobs
+  echo "--------------------------------------------------------------------------------"
 }
 
 stop_children() {
@@ -232,9 +301,10 @@ trap stop_children INT TERM
 echo "Seeds: ${SEEDS[*]}"
 echo "Enabled experiments: ${#EXPERIMENTS[@]}"
 echo "Maximum concurrent jobs: $MAX_JOBS"
+echo "Progress update interval: ${PROGRESS_INTERVAL_SECONDS}s"
 echo "Total jobs: $TOTAL_JOBS"
 echo "Logs: results/batch_logs/"
-echo
+echo "--------------------------------------------------------------------------------"
 
 for seed in "${SEEDS[@]}"; do
   if [[ ! $seed =~ ^[0-9]+$ ]]; then
@@ -255,7 +325,7 @@ for seed in "${SEEDS[@]}"; do
     fi
 
     while (( RUNNING_JOBS >= MAX_JOBS )); do
-      reap_one_job
+      wait_for_progress_or_completion
     done
 
     echo "Starting: $run_name"
@@ -268,11 +338,13 @@ for seed in "${SEEDS[@]}"; do
 done
 
 while (( RUNNING_JOBS > 0 )); do
-  reap_one_job
+  wait_for_progress_or_completion
 done
 
 echo
+echo "--------------------------------------------------------------------------------"
 echo "Finished $COMPLETED_JOBS job(s); failures: $FAILED_JOBS"
+echo "--------------------------------------------------------------------------------"
 if (( FAILED_JOBS > 0 )); then
   exit 1
 fi
