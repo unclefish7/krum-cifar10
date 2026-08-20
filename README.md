@@ -38,6 +38,7 @@ attacks.py              Gaussian Byzantine gradient attack
 train_distributed.py    10-worker 串行同步训练入口
 experiment_logger.py    实验结果记录器
 plot_results.py         多实验结果解析与绘图
+run_experiments.sh      多 seed、固定并发数量的批量实验入口
 requirements.txt        基础 Python 依赖
 docs/                   论文 PDF
 ```
@@ -170,6 +171,9 @@ python train_distributed.py \
 下面六组命令使用 seed 0。多随机种子实验时，将 `--seed`、`--partition-seed`、
 攻击实验的 `--attack-seed`，以及 run name 中的 seed 一起改为 1、2。
 
+如果需要一次运行多组实验，可直接使用后文的“批量运行”脚本；这里保留完整单次命令，
+便于检查配置或只重跑某一组。
+
 ### 1. Mean，无攻击
 
 ```bash
@@ -281,6 +285,70 @@ python train_distributed.py \
 梯度矩阵并替换恶意 worker 对应的行，不会原地破坏攻击前数据。攻击实验中的训练
 loss 和 accuracy 只统计当前 round 的诚实 worker。`aggregation.jsonl` 会逐 round
 保存实际恶意 worker ID，并记录聚合器是否选择了恶意 worker。
+
+## 批量运行
+
+`run_experiments.sh` 默认批量调度标准六组实验的 seed 0、1、2，并允许最多三个训练
+进程同时共享 GPU。脚本不会跳过已经完成的实验；再次执行会重新运行全部启用项。
+
+运行前直接编辑脚本顶部：
+
+```bash
+SEEDS=(0 1 2)
+MAX_JOBS=3
+```
+
+实验列表采用 `aggregator|condition` 格式。保留某行表示运行，注释掉表示不运行：
+
+```bash
+EXPERIMENTS=(
+  "mean|clean"
+  "krum|clean"
+  "multi-krum|clean"
+  "mean|gaussian"
+  "krum|gaussian"
+  "multi-krum|gaussian"
+)
+```
+
+例如只运行 Krum 和 Multi-Krum 的 Gaussian attack：
+
+```bash
+EXPERIMENTS=(
+  # "mean|clean"
+  # "krum|clean"
+  # "multi-krum|clean"
+  # "mean|gaussian"
+  "krum|gaussian"
+  "multi-krum|gaussian"
+)
+```
+
+启动批量实验：
+
+```bash
+conda activate krum
+./run_experiments.sh
+```
+
+脚本会动态维持不超过 `MAX_JOBS` 个任务。每个任务的终端输出单独写入：
+
+```text
+results/batch_logs/<run-name>.log
+```
+
+因此并发任务的 tqdm 和指标不会混在同一个终端中。可以在另一个 shell 查看某个任务：
+
+```bash
+tail -f results/batch_logs/RUN_NAME.log
+```
+
+重新运行同名任务时，训练记录仍会因时间戳不同而保存在新的实验目录中，但对应的
+`batch_logs/<run-name>.log` 会被本次输出覆盖。
+
+使用 `MAX_JOBS=1` 可获得更干净的耗时数据；`MAX_JOBS=3` 适合提高多 seed 准确率
+实验的整体吞吐量。并发运行得到的 aggregation time、round time 和 total time 不应
+用于严格的聚合器性能对比。
 
 ## 实验记录
 
