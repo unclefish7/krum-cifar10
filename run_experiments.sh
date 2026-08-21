@@ -10,7 +10,7 @@
 set -uo pipefail
 
 # Run every enabled experiment once for each seed.
-SEEDS=(0 1 2 3 4)
+SEEDS=(1 2 3 4)
 
 # Maximum number of training processes sharing the GPU at the same time.
 # Use 1 for clean timing measurements and a higher value for throughput.
